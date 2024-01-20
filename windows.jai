@@ -180,8 +180,8 @@ recv_http_request :: (socket: MySocket) -> Request {
 
   request.socket         = socket;
 
-  #if parseheaders request.headers.allocator = tallocator;
-  #if parseheaders init(*request.headers);
+  request.headers.allocator = tallocator;
+  init(*request.headers);
 
   BUFFER_LEN :: 1024*10;
   request.raw.data = talloc(BUFFER_LEN);
@@ -222,7 +222,7 @@ recv_http_request :: (socket: MySocket) -> Request {
         }
 
         kv := split(line, ": ");
-        #if parseheaders table_add(*request.headers, kv[0], kv[1]);
+        table_add(*request.headers, kv[0], kv[1]);
 
         if kv[0] == {
           case "Content-Length";    request.content_length = xx to_integer(kv[1]);

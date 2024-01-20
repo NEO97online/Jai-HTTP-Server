@@ -76,7 +76,7 @@ Websocket :: struct {
 }
 
 Websocket_Server :: struct {
-  onopen        : (*Websocket)->();
+  onopen        : (*Request, *Websocket)->();
   onmsg         : (*Websocket, string)->();
   onclose       : (*Websocket)->();
 
@@ -140,8 +140,10 @@ websocket_send :: (ws: *Websocket, payload: string = "", op_code: Websocket.OPCO
   websocket_send_bytes(ws, payload);
 }
 
-
-
+websocket_close :: (ws: *Websocket) {
+  websocket_send(ws, op_code = .CLOSE);
+  websocket_delete(ws);
+}
 
 
 #scope_module
@@ -151,7 +153,7 @@ websocket_handle_request :: (request: *Request) {
   websocket_send_request_handshake_accepted :: (request: *Request) {
 
     hash_ws_key :: (Sec_WebSocket_Key: string) -> string {
-      data := tjoin(Sec_WebSocket_Key, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+      data := join(Sec_WebSocket_Key, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11",, temp);
       websocket_key_hash := base64_encode(xx sha1_binary(data)); #import,dir "modules/sha1"; #import "Base64";
       return websocket_key_hash;
     }
@@ -165,7 +167,7 @@ websocket_handle_request :: (request: *Request) {
   websocket_send_request_handshake_accepted(request);
 
   ws := websocket_new(request);
-  if ws.server.onopen then ws.server.onopen(ws);
+  if ws.server.onopen then ws.server.onopen(request, ws);
 
   websocket_read_frame(ws);
   if ws.err then mylog("unhandled websocket error!!!!");
@@ -339,10 +341,6 @@ websocket_read_frame :: (ws: *Websocket) {
     }
   }
 }
-
-
-
-
 
 
 #scope_file

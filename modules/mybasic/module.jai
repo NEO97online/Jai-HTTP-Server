@@ -25,8 +25,6 @@ push_tallocator :: () #expand {
   context.allocator        = tallocator;
 };
 
-tjoin :: #bake_arguments join(allocator=tallocator);
-
 substr :: inline (str: string, index: int, count: int = 0) -> string #must {
   if count == 0 count = str.count - index;
 

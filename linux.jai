@@ -58,18 +58,20 @@ http_listen :: (port: u16 = 80, ip: string = "0.0.0.0") {
 
 listen_socket_ssl: Socket;
 listen_called_ssl: bool;
-https_listen :: (port: u16 = 443, ip: string = "0.0.0.0", certificate: string = "", privatekey: string = "") {
-  assert(listen_called, "http_listen must be called first for now. because it does setup stuff that i'm lazy to deal with");
-  assert(!listen_called_ssl, "cannot call listen multiple times");
-  listen_called_ssl = true;
+#if ENABLE_HTTPS {
+  https_listen :: (port: u16 = 443, ip: string = "0.0.0.0", certificate: string = "", privatekey: string = "") {
+    assert(listen_called, "http_listen must be called first for now. because it does setup stuff that i'm lazy to deal with");
+    assert(!listen_called_ssl, "cannot call listen multiple times");
+    listen_called_ssl = true;
 
-  ssl_init(certificate=certificate, privatekey=privatekey);
+    ssl_init(certificate=certificate, privatekey=privatekey);
 
-  listen_socket_ssl = create_listen_socket(port, ip);
-  log("HTTPS Server listening on %:%", ip, port);
+    listen_socket_ssl = create_listen_socket(port, ip);
+    log("HTTPS Server listening on %:%", ip, port);
 
-  for * thread, i: thread_pool {
-    add_to_epoll_fd_list(epoll_fd_pool[i], listen_socket_ssl, null, EPOLLIN | EPOLLET /*| EPOLLONESHOT*/);
+    for * thread, i: thread_pool {
+      add_to_epoll_fd_list(epoll_fd_pool[i], listen_socket_ssl, null, EPOLLIN | EPOLLET /*| EPOLLONESHOT*/);
+    }
   }
 }
 
@@ -125,7 +127,10 @@ thread_pool_proc :: (thread: *Thread) -> s64 {
           setsocktcpopt(client_socket, TCP_NODELAY); // @crash setsocktcpopt err: 9 socket: 190 option: 1 val: 1
           add_to_epoll_fd_list(epoll_fd, client_socket, null, EPOLLIN/* | EPOLLET | EPOLLONESHOT*/);
 
-          if event.data.fd == listen_socket_ssl then ssl_make_socket_ssl(client_socket);
+
+          #if ENABLE_HTTPS {
+            if event.data.fd == listen_socket_ssl then ssl_make_socket_ssl(client_socket);
+          }
 
           new_request_from_pool(client_socket);
           handle_client_socket_accepted_or_read_ready(client_socket);
@@ -173,9 +178,9 @@ new_request_from_pool :: (client_socket: Socket) -> *Request {
   }
   request.raw.count = 0;
 
-  // #if parseheaders uninit(*request.headers);
-  // #if parseheaders init(*request.headers);
-  #if parseheaders table_reset(*request.headers);
+  // uninit(*request.headers);
+  // init(*request.headers);
+  table_reset(*request.headers);
 
   return request;
 }
@@ -194,8 +199,10 @@ handle_client_socket_accepted_or_read_ready :: (client_socket: Socket) {
     request := read_http_request(client_socket);
     if request == null  return; // we're waiting to read, need to come back later
     if request.err {
-      // ssl has a massive memory leak when run with high concurrency... this doesn't fix it...
-      ssl_delete(client_socket); // i thik this is memory leaking the ssl pointers
+      #if ENABLE_HTTPS {
+        // ssl has a massive memory leak when run with high concurrency... this doesn't fix it...
+        ssl_delete(client_socket); // i thik this is memory leaking the ssl pointers
+      }
 
       close(client_socket);
       return;
@@ -255,7 +262,7 @@ read_http_request :: (socket: Socket) -> *Request {
         }
 
         kv := split(line, ": ");
-        #if parseheaders table_add(*request.headers, kv[0], kv[1]);
+        table_add(*request.headers, kv[0], kv[1]);
 
         if kv[0] == {
           case "Content-Length";    request.content_length   = xx to_integer(kv[1]);
@@ -372,7 +379,10 @@ get_ip_string_from_socket :: (socket: s32) -> string {
 
 
 
-#import,dir "modules/openssl";
+#if ENABLE_HTTPS {
+  #import,dir "modules/openssl";
+}
+
 #import,dir "modules/mybasic";
 #import,dir "modules/mysocket";
 
@@ -380,5 +390,3 @@ get_ip_string_from_socket :: (socket: s32) -> string {
 #import "File";
 #import "Thread";
 
-TCP_NODELAY    :: 1;
-SO_KEEPALIVE   :: 0x0008;

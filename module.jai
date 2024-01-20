@@ -1,6 +1,7 @@
-
+ENABLE_HTTPS :: false;
 
 #load "websocket.jai";
+#load "urlencode.jai";
 
 #if OS == .WINDOWS #load "windows.jai";
 #if OS == .LINUX   #load "linux.jai";
@@ -12,6 +13,7 @@
 
 // todo: this method of looping through middlewares is slow @perf
 middlewares: [..]Middleware;
+fallback_handler: (*Request)->();
 
 Middleware :: struct {
   method: METHOD;
@@ -23,17 +25,33 @@ get  :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.GE
 post :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.POST, cb=cb, path=normalize_path(path)}); }
 any  :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.ANY , cb=cb, path=normalize_path(path)}); }
 
+fallback :: (cb: (*Request)->()) {fallback_handler = cb; }
 
 
 
 
-
-send_html :: (request: *Request, html: string, status_code: u16 = 200, content_type: string = "text/html", content_encoding: string = "") {
+send_html :: (request: *Request, html: string, status_code: u16 = 200, content_type: string = "text/html", content_encoding: string = "", headers: []string = .[]) {
   // todo: status_code 404 is responding with 404 OK; lol
-  content_encoding_header := ifx content_encoding then tprint("\r\nContent-Encoding: %", content_encoding) else "";
-  http_response := tprint("HTTP/1.1 % OK\r\nContent-Length: %\r\nContent-Type: %; charset=UTF-8%\r\n\r\n%", status_code, html.count, content_type, content_encoding_header, html);
+  
+  headers_builder: String_Builder;
+  init_string_builder(*headers_builder);
 
-  mysocket_write(request.socket, http_response);
+  if content_encoding {
+    print_to_builder(*headers_builder, "\r\nContent-Encoding: %", content_encoding);
+  }
+  
+  for header : headers {
+    print_to_builder(*headers_builder, "\r\n%", header);
+  }
+
+  headers_str := builder_to_string(*headers_builder);
+
+  http_response := tprint("HTTP/1.1 % OK\r\nContent-Length: %\r\nContent-Type: %; charset=UTF-8%\r\n\r\n%", status_code, html.count, content_type, headers_str, html);
+
+  print("[DEBUG] send_html response: \n%\n", tprint("HTTP/1.1 % OK\r\nContent-Length: %\r\nContent-Type: %; charset=UTF-8%\r\n\r", status_code, html.count, content_type, headers_str));
+
+  bytes_sent := mysocket_write(request.socket, http_response);
+  print("bytes_sent: %\n", bytes_sent);
   request.response_sent = true;
 }
 
@@ -46,22 +64,53 @@ send_json :: (request: *Request, json: string) {
 send_file :: (request: *Request, raw_filename: string) {
   filename := normalize_filename(raw_filename);
 
+  print("sending file: %\n", filename);
+
   file_cache_record, success := file_cache_get_or_create(filename);
-  if !success return;
+  if !success {
+    print("[ERROR] failed to send file: %\n", filename);
+    return;
+  }
 
   // for very small files, it's possible that brotli encoding is longer than the raw content.
   // in that case the brotli api will return the brotli encoding as ""
   // and so we will return the raw content instead, even though the client accepts br encoding
-  are_we_returning_br := does_request_accept_encoding(request, "br") && file_cache_record.brotli != "";
+  are_we_returning_br := false;//does_request_accept_encoding(request, "br") && file_cache_record.brotli != "";
 
   content := ifx are_we_returning_br then file_cache_record.brotli else file_cache_record.rawcontent;
   content_encoding := ifx are_we_returning_br then "br" else "";
   content_type := extension2contenttype(filename);
+  print("successfully sending file\n");
   send_html(request, content, content_type=content_type, content_encoding=content_encoding);
 }
 
+send_redirect :: (request: *Request, redirect_to: string, status := 307, headers: []string = .[]) {
+  headers_builder: String_Builder;
+  init_string_builder(*headers_builder);
+  for header : headers {
+    print_to_builder(*headers_builder, "\r\n%", header);
+  }
+  headers_str := builder_to_string(*headers_builder);
 
-parseheaders :: true;
+  http_response := tprint("HTTP/1.1 % Temporary Redirect\r\nLocation: %\r\nContent-Length: 0%\r\n\r\n", status, redirect_to, headers_str);
+  print("response: %\n", http_response);
+  mysocket_write(request.socket, http_response);
+  request.response_sent = true;
+}
+
+
+SetCookie :: struct {
+  key       : string;
+  value     : string;
+  expires   : string;
+  domain    : string;
+  path      : string;
+  same_site : string;
+  secure    : bool;
+  http_only : bool;
+}
+
+
 Request :: struct {
   #as socket      : MySocket;
 
@@ -75,9 +124,10 @@ Request :: struct {
   accept_encoding : string;
 
   params          : Table(string, string);
-  #if parseheaders {
-    headers       : Table(string, string);
-  }
+  query           : Table(string, string);
+  headers         : Table(string, string);
+  form_data       : Table(string, string);
+  cookies         : Table(string, string);
 
   response_sent   : bool;
   err             : bool;
@@ -89,6 +139,30 @@ Request :: struct {
 
   get_param :: (request: *Request, name: string) -> string {
     val, found := table_find(*request.params, name);
+    if !found return "";
+    return val;
+  }
+
+  get_query :: (request: *Request, name: string) -> string {
+    val, found := table_find(*request.query, name);
+    if !found return "";
+    return val;
+  }
+
+  get_header :: (request: *Request, name: string) -> string {
+    val, found := table_find(*request.headers, name);
+    if !found return "";
+    return val;
+  }
+
+  get_formdata :: (request: *Request, name: string) -> string {
+    val, found := table_find(*request.form_data, name);
+    if !found return "";
+    return val;
+  }
+
+  get_cookie :: (request: *Request, name: string) -> string {
+    val, found := table_find(*request.cookies, name);
     if !found return "";
     return val;
   }
@@ -127,7 +201,103 @@ handle_request :: (request: *Request) {
     return true;
   }
 
+  parse_query_params :: (query_str: string) -> Table(string, string) {
+    query_params: Table(string, string);
+
+    key_builder: String_Builder;
+    init_string_builder(*key_builder);
+    value_builder: String_Builder;
+    init_string_builder(*value_builder);
+
+    ParseState :: enum u8 {KEY; VALUE;}
+
+    state := ParseState.KEY;
+
+    for i : 0..query_str.count-1 {
+      if query_str[i] == {
+        case #char "&";
+          if state == .KEY {
+            // we encountered a loose key without a value, so we just set it to "true", i.e. /page?flag&foo
+            table_add(*query_params, builder_to_string(*key_builder), "true");
+          } else {
+            table_add(*query_params, builder_to_string(*key_builder), builder_to_string(*value_builder));
+          }
+          state = .KEY;
+        case #char "=";
+          state = .VALUE;
+        case;
+          char := ascii(query_str[i]);
+          if state == .KEY {
+            print_to_builder(*key_builder, char);
+          } else {
+            print_to_builder(*value_builder, char);
+          }
+      }
+    }
+
+    if state == .VALUE {
+      key := builder_to_string(*key_builder);
+      value := builder_to_string(*value_builder);
+
+      if value.count > 0 {
+        table_add(*query_params, key, value);
+      } else {
+        // we encountered a loose key without a value, so we just set it to "true", i.e. /page?flag&foo
+        table_add(*query_params, key, "true");
+      }
+    }
+
+    return query_params;
+  }
+
+  parse_path_query_params :: (path: string) -> string, Table(string, string) {
+    path_parts := split(path, "?");
+    path_str := path_parts[0];
+
+    assert(path_parts.count > 0);
+
+    if path_parts.count == 1 {
+      // no query params
+      empty_query_params: Table(string, string);
+      return path_str, empty_query_params;
+    }
+
+    query_str := path_parts[1];
+
+    if query_str.count == 0 {
+      // no query params
+      empty_query_params: Table(string, string);
+      return path_str, empty_query_params;
+    }
+
+    query_params := parse_query_params(query_str);
+
+    return path_str, query_params;
+  }
+
   path_normal := normalize_path(request.path);
+
+  path_normal, request.query = parse_path_query_params(path_normal);
+  
+  cookie_header := Request.get_header(request, "Cookie");
+  if cookie_header {
+    for cookie_str : split(cookie_header, ";") {
+      cookie_kv := split(cookie_str, "=");
+      if cookie_kv.count < 2 {
+        print("[ERROR] Invalid cookie header: %\n", cookie_header);
+        break;
+      }
+      table_add(*request.cookies, trim(cookie_kv[0]), trim(cookie_kv[1]));
+    }
+  }
+
+  content_type := Request.get_header(request, "Content-Type");
+  if content_type == "application/x-www-form-urlencoded" {
+    decoded_body := url_decode(request.body);
+    // print("form urlencoded: %\n", request.body);
+    // print("decoded: %\n", decoded_body);
+    request.form_data = parse_query_params(decoded_body);
+  }
 
   if request.websocket_key {
     if table_find_pointer(*websocket_servers, path_normal) {
@@ -167,7 +337,13 @@ handle_request :: (request: *Request) {
   }
 
   // if none of the middleware responded to this request, 404
-  if !request.response_sent then send_html(request, tprint("<pre>Cannot % %</pre>", request.method, request.path), status_code=404);
+  if !request.response_sent {
+    if fallback_handler {
+      fallback_handler(request);
+    } else {
+      send_html(request, tprint("<pre>Cannot % %</pre>", request.method, request.path), status_code=404);
+    }
+  }
 }
 
 
@@ -185,9 +361,9 @@ static :: (folder: string) {
     // if the path ends wht a / then we consider it a folder, and we'll add index.html to the end of the path to load that.
     path: string;
     if ends_with(request.path, "/") {
-      path = tjoin(cwd, "/", the_static_folder_to_serve, request.path, "index.html");
+      path = join(cwd, "/", the_static_folder_to_serve, request.path, "index.html",, temp);
     } else {
-      path = tjoin(cwd, "/", the_static_folder_to_serve, request.path);
+      path = join(cwd, "/", the_static_folder_to_serve, request.path,, temp);
     }
 
     send_file(request, path);
@@ -203,7 +379,7 @@ file_cache: Table(string, File_Cache_Record);
 
 file_cache_get_or_create :: (filename: string) -> File_Cache_Record, bool {
 
-  #if OS != .WINDOWS { // don't actually cache files on windows. for better development experience
+  #if false && OS != .WINDOWS { // don't actually cache files on windows. for better development experience
     record, found := table_find(*file_cache, filename);
     if found then return record, true;
   }
@@ -328,7 +504,7 @@ hex_chars_to_byte :: (chars: string) -> u8 {
 
 mysocket_read :: (socket: Socket, buffer: *u8, bufferlen: s32) -> s64 {
 
-  #if OS == .LINUX
+  #if OS == .LINUX && ENABLE_HTTPS
     if ssl_is_socket_ssl(socket) // perf hash table lookup
       return ssl_read(socket, buffer, xx bufferlen);
 
@@ -337,13 +513,47 @@ mysocket_read :: (socket: Socket, buffer: *u8, bufferlen: s32) -> s64 {
 
 mysocket_write :: (socket: Socket, buffer: string) -> s64 {
 
-  #if OS == .LINUX
+  #if OS == .LINUX && ENABLE_HTTPS
     if ssl_is_socket_ssl(socket) // perf hash table lookup
       return ssl_write(socket, buffer.data, xx buffer.count);
+  
+  print("[mysocket_write] send buffer: %\n", buffer.count);
 
-  return send(socket, buffer.data, xx buffer.count, 0);
+  total_bytes_sent := 0;
+  while total_bytes_sent < buffer.count {
+    bytes_sent := send(socket, buffer.data + total_bytes_sent, xx buffer.count, 0);
+    if bytes_sent == -1 {
+      err := errno();
+      if err == {
+        case EWOULDBLOCK;
+          // the socket is non-blocking, keep retrying
+          continue;
+        
+        case;
+          // some other error occurred
+          print("[mysocket_write] failed due to errno %\n", err);
+          return -1;
+      }
+      print("[mysocket_write] ERROR");
+    }
+    total_bytes_sent += bytes_sent;
+    print("[mysocket_write] sent % bytes so far...\n", total_bytes_sent);
+  }
+  print("[mysocket_write] completed, sent total of % bytes.\n", total_bytes_sent);
+  return total_bytes_sent;
 }
 
 
-
 #import "String";
+#import "POSIX";
+
+
+#scope_file
+
+ascii :: (num: u8) -> string #expand {
+    // must be a macro or *num gets invalidated after return
+    str : string = ---;
+    str.count = 1;
+    str.data  = *num;
+    return str;
+}

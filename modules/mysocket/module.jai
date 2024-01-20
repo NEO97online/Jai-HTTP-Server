@@ -82,6 +82,7 @@ socket_close :: (socket: Socket) {
     if sent_byte_count == SOCKET_ERROR {
       mylog("[TCP] Send failed with error:", WSAGetLastError());
     }
+    print("sent_byte_count: %\n", sent_byte_count);
     return sent_byte_count;
   }
 
